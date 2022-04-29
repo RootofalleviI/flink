@@ -30,6 +30,7 @@ import org.apache.flink.runtime.plugable.NonReusingDeserializationDelegate;
 import org.apache.flink.streaming.runtime.io.checkpointing.CheckpointedInputGate;
 import org.apache.flink.streaming.runtime.streamrecord.StreamElement;
 import org.apache.flink.streaming.runtime.streamrecord.StreamElementSerializer;
+import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
 import org.apache.flink.streaming.runtime.watermarkstatus.StatusWatermarkValve;
 
 import java.io.IOException;
@@ -37,6 +38,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Optional;
+import java.util.PriorityQueue;
 import java.util.concurrent.CompletableFuture;
 
 import static org.apache.flink.util.Preconditions.checkNotNull;
@@ -62,6 +64,30 @@ public abstract class AbstractStreamTaskNetworkInput<
     private InputChannelInfo lastChannel = null;
     private R currentRecordDeserializer = null;
 
+    /** Custom ComparableRecord type, just a wrapper around StreamRecord for easy comparison */
+    class ComparableRecord implements Comparable<ComparableRecord> {
+        StreamRecord record;
+
+        ComparableRecord(StreamRecord record) {
+            this.record = record;
+        }
+
+        public int compareTo(ComparableRecord r2) {
+            if (record.getTimestamp() < r2.record.getTimestamp()) {
+                return -1;
+            } else if (record.getTimestamp() == r2.record.getTimestamp()) {
+                return 0;
+            } else {
+                return 1;
+            }
+        }
+    }
+
+    private PriorityQueue<ComparableRecord> normalPriorityQueue =
+            new PriorityQueue<ComparableRecord>();
+    private PriorityQueue<ComparableRecord> highPriorityQueue =
+            new PriorityQueue<ComparableRecord>();
+
     public AbstractStreamTaskNetworkInput(
             CheckpointedInputGate checkpointedInputGate,
             TypeSerializer<T> inputSerializer,
@@ -78,10 +104,13 @@ public abstract class AbstractStreamTaskNetworkInput<
         for (InputChannelInfo i : checkpointedInputGate.getChannelInfos()) {
             flattenedChannelIndices.put(i, flattenedChannelIndices.size());
         }
-
         this.statusWatermarkValve = checkNotNull(statusWatermarkValve);
         this.inputIndex = inputIndex;
         this.recordDeserializers = checkNotNull(recordDeserializers);
+
+        /** record priority queues */
+        this.normalPriorityQueue = new PriorityQueue<ComparableRecord>();
+        this.highPriorityQueue = new PriorityQueue<ComparableRecord>();
     }
 
     @Override
@@ -131,7 +160,24 @@ public abstract class AbstractStreamTaskNetworkInput<
 
     private void processElement(StreamElement recordOrMark, DataOutput<T> output) throws Exception {
         if (recordOrMark.isRecord()) {
-            output.emitRecord(recordOrMark.asRecord());
+            // record timestamp
+            StreamRecord record = recordOrMark.asRecord();
+            long timestamp = record.getTimestamp();
+            long currentWatermark = statusWatermarkValve.lastOutputWatermark;
+            // watermark1: 450 -> 452
+            // event: 451 -> normalqueue
+            // event: 452 -> normalqueue
+            if (timestamp < currentWatermark) {
+                highPriorityQueue.add(new ComparableRecord(record));
+            } else {
+                normalPriorityQueue.add(new ComparableRecord(record));
+            }
+            if (!highPriorityQueue.isEmpty()) {
+                output.emitRecord(highPriorityQueue.poll().record);
+            } else if (!normalPriorityQueue.isEmpty()) {
+                output.emitRecord(normalPriorityQueue.poll().record);
+            }
+            // output.emitRecord(recordOrMark.asRecord());
         } else if (recordOrMark.isWatermark()) {
             statusWatermarkValve.inputWatermark(
                     recordOrMark.asWatermark(), flattenedChannelIndices.get(lastChannel), output);

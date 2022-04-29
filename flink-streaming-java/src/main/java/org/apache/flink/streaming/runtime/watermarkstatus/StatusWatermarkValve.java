@@ -48,7 +48,7 @@ public class StatusWatermarkValve {
     private final InputChannelStatus[] channelStatuses;
 
     /** The last watermark emitted from the valve. */
-    private long lastOutputWatermark;
+    public long lastOutputWatermark;
 
     /** The last watermark status emitted from the valve. */
     private WatermarkStatus lastOutputWatermarkStatus;
