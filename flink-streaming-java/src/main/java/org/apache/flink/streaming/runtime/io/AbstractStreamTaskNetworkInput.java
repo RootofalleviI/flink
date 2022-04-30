@@ -63,6 +63,7 @@ public abstract class AbstractStreamTaskNetworkInput<
     protected final int inputIndex;
     private InputChannelInfo lastChannel = null;
     private R currentRecordDeserializer = null;
+    private long currentWatermark = 0;
 
     /** Custom ComparableRecord type, just a wrapper around StreamRecord for easy comparison */
     class ComparableRecord implements Comparable<ComparableRecord> {
@@ -163,7 +164,6 @@ public abstract class AbstractStreamTaskNetworkInput<
             // record timestamp
             StreamRecord record = recordOrMark.asRecord();
             long timestamp = record.getTimestamp();
-            long currentWatermark = statusWatermarkValve.lastOutputWatermark;
             // watermark1: 450 -> 452
             // event: 451 -> normalqueue
             // event: 452 -> normalqueue
@@ -179,6 +179,11 @@ public abstract class AbstractStreamTaskNetworkInput<
             }
             // output.emitRecord(recordOrMark.asRecord());
         } else if (recordOrMark.isWatermark()) {
+            currentWatermark = recordOrMark.asWatermark().getTimestamp();
+            while (!normalPriorityQueue.isEmpty()
+                    && normalPriorityQueue.peek().record.getTimestamp() < currentWatermark) {
+                highPriorityQueue.add(normalPriorityQueue.poll());
+            }
             statusWatermarkValve.inputWatermark(
                     recordOrMark.asWatermark(), flattenedChannelIndices.get(lastChannel), output);
         } else if (recordOrMark.isLatencyMarker()) {
