@@ -36,9 +36,10 @@ import org.apache.flink.streaming.runtime.watermarkstatus.StatusWatermarkValve;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedList;
 import java.util.Map;
 import java.util.Optional;
-import java.util.PriorityQueue;
+import java.util.Queue;
 import java.util.concurrent.CompletableFuture;
 
 import static org.apache.flink.util.Preconditions.checkNotNull;
@@ -65,29 +66,8 @@ public abstract class AbstractStreamTaskNetworkInput<
     private R currentRecordDeserializer = null;
     private long currentWatermark = 0;
 
-    /** Custom ComparableRecord type, just a wrapper around StreamRecord for easy comparison */
-    class ComparableRecord implements Comparable<ComparableRecord> {
-        StreamRecord record;
-
-        ComparableRecord(StreamRecord record) {
-            this.record = record;
-        }
-
-        public int compareTo(ComparableRecord r2) {
-            if (record.getTimestamp() < r2.record.getTimestamp()) {
-                return -1;
-            } else if (record.getTimestamp() == r2.record.getTimestamp()) {
-                return 0;
-            } else {
-                return 1;
-            }
-        }
-    }
-
-    private PriorityQueue<ComparableRecord> normalPriorityQueue =
-            new PriorityQueue<ComparableRecord>();
-    private PriorityQueue<ComparableRecord> highPriorityQueue =
-            new PriorityQueue<ComparableRecord>();
+    private final Queue<StreamRecord<T>> normalPriorityQueue;
+    private final Queue<StreamRecord<T>> highPriorityQueue;
 
     public AbstractStreamTaskNetworkInput(
             CheckpointedInputGate checkpointedInputGate,
@@ -109,9 +89,9 @@ public abstract class AbstractStreamTaskNetworkInput<
         this.inputIndex = inputIndex;
         this.recordDeserializers = checkNotNull(recordDeserializers);
 
-        /** record priority queues */
-        this.normalPriorityQueue = new PriorityQueue<ComparableRecord>();
-        this.highPriorityQueue = new PriorityQueue<ComparableRecord>();
+        /* record priority queues */
+        this.normalPriorityQueue = new LinkedList<>();
+        this.highPriorityQueue = new LinkedList<>();
     }
 
     @Override
@@ -161,27 +141,22 @@ public abstract class AbstractStreamTaskNetworkInput<
 
     private void processElement(StreamElement recordOrMark, DataOutput<T> output) throws Exception {
         if (recordOrMark.isRecord()) {
-            // record timestamp
-            StreamRecord record = recordOrMark.asRecord();
+            StreamRecord<T> record = recordOrMark.asRecord();
             long timestamp = record.getTimestamp();
-            // watermark1: 450 -> 452
-            // event: 451 -> normalqueue
-            // event: 452 -> normalqueue
             if (timestamp < currentWatermark) {
-                highPriorityQueue.add(new ComparableRecord(record));
+                highPriorityQueue.add(record);
             } else {
-                normalPriorityQueue.add(new ComparableRecord(record));
+                normalPriorityQueue.add(record);
             }
             if (!highPriorityQueue.isEmpty()) {
-                output.emitRecord(highPriorityQueue.poll().record);
+                output.emitRecord(highPriorityQueue.poll());
             } else if (!normalPriorityQueue.isEmpty()) {
-                output.emitRecord(normalPriorityQueue.poll().record);
+                output.emitRecord(normalPriorityQueue.poll());
             }
-            // output.emitRecord(recordOrMark.asRecord());
         } else if (recordOrMark.isWatermark()) {
             currentWatermark = recordOrMark.asWatermark().getTimestamp();
             while (!normalPriorityQueue.isEmpty()
-                    && normalPriorityQueue.peek().record.getTimestamp() < currentWatermark) {
+                    && normalPriorityQueue.peek().getTimestamp() < currentWatermark) {
                 highPriorityQueue.add(normalPriorityQueue.poll());
             }
             statusWatermarkValve.inputWatermark(
